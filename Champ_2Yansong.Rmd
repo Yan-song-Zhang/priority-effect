@@ -1,0 +1,454 @@
+---
+title: "IPM_champ"
+author: "ZZ"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+---
+
+First come, first served project\\
+
+sp: 1 = *Chlamy*, 2 = *Acutodesmus obliquus*, 3 = *Scenedesmus quadricauda*, 4= *Monoraphidium griffithii*, 5 = *Chlorella vulgaris*
+
+```{r setup}
+knitr::opts_chunk$set(message = F,warning = F)
+```
+
+
+
+
+```{r}
+options(tidyverse.quiet = TRUE)
+library(tidyverse)
+library(keras)
+library(vegan)
+library(lmerTest)
+dir.create('fig') # create
+source('functions.R')
+
+# theme for ggplot
+theme <- theme_bw() + 
+  theme(panel.background = element_blank(),
+              panel.border     = element_rect(fill = NA), 
+              strip.background = element_blank(),
+              strip.text.x = element_text(size = 8),
+              axis.text.x = element_text(size = 8, angle = 0, hjust = 0.5, colour = 'black'),
+              axis.text.y  = element_text(size = 8, colour = 'black'),
+              axis.title = element_text(size = 9),# size of x  y lab
+              #legend.position   = c(0.9, 0.85),
+              legend.title      = element_text(size = 8),
+              legend.text       = element_text(size = 6),
+              legend.key.height = unit(0.8,'line'),
+              legend.background = element_blank(),
+              legend.key        = element_rect(colour = NA, fill = NA),
+              plot.tag    = element_text(size = 9.5, face  = 'bold'),
+              plot.tag.position = c(0.03, 1),
+              plot.title  = element_text(hjust = 0.5, size = 10),
+              plot.margin = margin(t = 0.5, r = 0.1, b = 0, l = 0.1, unit = "cm")) 
+
+```
+
+
+# read and clean data
+```{r, eval = F}
+# read the competition assays
+file_names <- list.files('dat/')
+
+my_read_delim <- function(file, path = 'dat') { # function to read the each plate
+  d <- read.delim(file.path(path, file), header = T, skip = 5)
+  return(d)
+
+}
+
+dat_raw <- (lapply(file_names, function(file) my_read_delim(file))) %>%
+  bind_rows
+
+rm(my_read_delim)
+
+save(dat_raw, file = 'd_raw20250326.RData')# add 24 new files from t11
+```
+
+check whether there are exporting problems (e.g. some of the wells not exported )
+```{r, eval = F}
+#load('d_raw.RData')
+load('d_raw.RData')
+dat_raw %>% select(MEASUREMENT.SET.ID, Well.Name) %>% distinct() %>% group_by(MEASUREMENT.SET.ID) %>% tally() 
+# the well that does not have culture
+dat_raw %>% filter(MEASUREMENT.SET.ID %in% c('33421', '33422')) %>% select(MEASUREMENT.SET.ID, Well.Name) %>% distinct() %>% 
+  group_by(Well.Name) %>% tally %>% filter(n == 1) %>% 
+  pull(Well.Name)
+```
+
+info\
+t0 and t_n are different, need to clean separately\
+t_n
+```{r, eval = F}
+info_medium   <- tibble(medium  = c(3, 2, 1, 2, 0, 0, 3, 1), # match column with medium
+                        column = paste(0, 1:8, sep ='')
+                      ) %>% 
+  # the detail info of the medium
+  left_join(tibble(medium = 0:3,
+                   no     = c(64, 0, 48, 16),
+                   nh     = c(0, 64, 16, 48))
+            )
+
+
+# the plate order on day 1 and day 4
+info_plate <- tibble(MEASUREMENT.SET.ID = dat_raw$MEASUREMENT.SET.ID %>% unique %>% sort , # plate_ID from IXM
+                     culture = c(NA,  # t0 plate has both mono and community, so I assigned IT NA
+                                 c('mono', rep('comp', 5)) %>% rep(3), # t1 - t3
+                                 rep('comp', 5), 'mono', # t4
+                                 c('mono', rep('comp', 5)) %>% rep(6 + 4)  # t5 again, first plate is the monocutlure
+                                 ), # t0 plate has both mono and community, so I assigned IT NA
+                     comm_v  = c(NA, 
+                                 0:5 %>% rep(3), #t1-t3
+                                 1:5, 0, # t4
+                                 0:5 %>% rep(6 + 4)
+                                 ), # e.g. 1 means combination 1-8
+                     day = c(0, rep(1:14 * 3.5,  each = 6))
+                       ) 
+
+# monoculture plate, match species with the row
+info_mono <- tibble(sp = 1:5,
+                    row = LETTERS[1:5]
+                    )
+
+# somehow the R code did not give the same random number, So, i have to copy from the python code
+info_comm <- tibble(comm = c(23, 4, 19, 37, 34, 3, 6, 27, 29, 18, 5, 21, 32, 39, 
+                        14, 30, 26, 17, 35, 33, 15, 28, 0, 22, 23, 4, 19, 
+                        7, 34, 3, 6, 13, 29, 18, 5, 8, 32, 39, 14, 36, 26, 20, 16, 
+                        2, 15, 24, 31, 9, 23, 4, 37, 7, 34, 3, 27, 13, 29, 18, 21, 8, 
+                        32, 39, 30, 36, 17, 20, 11, 25, 28, 24, 38, 1, 23, 19, 37, 7, 34,
+                        6, 27, 13, 29, 5, 21, 8, 32, 14, 30, 36, 35, 16, 11, 10, 0, 31, 38,
+                        12, 4, 19, 37, 7, 3, 6, 27, 13, 18, 5, 21, 8, 39, 14, 30, 36, 33, 2, 25, 10, 22, 9, 1, 12),
+               
+               sp_ID = c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4)
+               ,
+               vol = c(165, 165, 165, 165, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 198, 198, 198, 198, 22, 22, 22, 22, 18.3333333333333, 18.3333333333333, 18.3333333333333, 165, 165, 165, 165, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 22, 198, 198, 198, 198, 22, 22, 22, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 165, 165, 165, 165, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 22, 22, 198, 198, 198, 198, 22, 22, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 165, 165, 165, 165, 18.3333333333333, 18.3333333333333, 18.3333333333333, 22, 22, 22, 198, 198, 198, 198, 22, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 18.3333333333333, 165, 165, 165, 165, 22, 22, 22, 22, 198, 198, 198, 198)
+) %>% 
+  mutate(comm = comm + 1, # python to R language
+         sp_ID = sp_ID + 1) %>% 
+  rename(sp = sp_ID) %>% 
+  arrange(comm) %>% 
+  group_by(comm) %>% 
+  mutate(high = ifelse(vol == max(vol), sp, 0)) %>%  # ‘high’ tells with species has the highest ratio
+  summarise(lst_sp = paste(sp, collapse = '_'),
+            n_sp   = n(),
+            high = max(high)) %>% 
+  mutate(comm_v = rep(1:5, each  = 8),
+         row    = rep(LETTERS[1:8], 5))
+```
+
+
+t0
+```{r, eval = F}
+info_mono_t0 <- tibble(sp = 1:5, 
+                       column = c('07', '08', '09', '10', '11')
+                       )
+
+info_comm_t0 <- info_comm %>% select(-comm_v, -row) %>% 
+  mutate(Well.Name = outer(LETTERS[1:8], 1:5, paste, sep = '0') %>% as.vector())
+```
+
+
+```{r, eval = F}
+dat_cl <- dat_raw %>% 
+  mutate(column = str_sub(Well.Name, 2, 3),
+         row    = str_sub(Well.Name, 1, 1)
+         ) %>% 
+  left_join(info_plate)
+
+```
+
+
+
+
+
+```{r, eval = F}
+# monoculture for training
+d_mono <- bind_rows(dat_cl %>% filter(day > 0, culture == 'mono') %>% left_join(info_mono), # t_n
+                    dat_cl %>% filter(day == 0) %>% right_join(info_mono_t0) # t0
+                    )
+# distinguish the species 
+d_comp <- bind_rows(dat_cl %>% filter(day > 0, culture == 'comp') %>% 
+                      left_join(info_comm) %>% left_join(info_medium),
+                    dat_cl %>% filter(day == 0) %>% right_join(info_comm_t0)
+                    ) %>% 
+  mutate(comm_v = ifelse(is.na(comm_v), 0, comm_v)) %>% 
+  filter(!(comm_v == 1 & Well.Name == 'B02'))
+
+```
+
+
+
+
+use only necessary data (e.g. features, day, which species, which ratio, which medium)
+```{r, eval = F}
+list <- colnames(d_comp)[str_detect(colnames(d_comp), 'Cell\\.\\.')]
+list <- list[!list %>% str_detect('ObjectID|Features.Count_Sum|Line.Length_Average')]
+
+
+
+d_comp <- d_comp %>% 
+  dplyr::select(all_of(list),  
+                Well.Name, comm, day, no, nh, high, lst_sp, n_sp, medium ) # well name is needed, as this tell the replicate
+d_mono  <- d_mono %>% 
+  dplyr::select(all_of(list),  
+                Well.Name, sp) 
+save(d_comp, d_mono, list, theme, file = 'd_cl20250327.RData')
+```
+
+
+# ML to distinguish differnt sp
+
+
+
+
+```{r, eval = F}
+# load('d_cl.RData')
+load('d_cl20250327.RData')
+lst_comm <- d_comp %>% pull(lst_sp) %>% unique
+```
+
+
+
+```{r, eval = F}
+lst_res <- list()
+pb = txtProgressBar(min = 0, max = length(lst_comm), initial = 0, style = 3) 
+for (comm_i in lst_comm) {
+  res_i <- deep_lear_n_sp(community = comm_i)
+  lst_res <- c(lst_res, res_i)
+  setTxtProgressBar(pb, which(comm_i == lst_comm))
+}
+save(lst_res, lst_comm, file = 'd_comp_obs20250327.RData') 
+```
+
+
+
+
+# data exploration
+```{r}
+load('d_comp_obs20250327.RData')
+```
+
+
+```{r}
+# accuracy of deep learning models
+t_acc_dl <- tibble(comm = lst_comm[1:(length(lst_res)/3)],
+                   acc = lst_res[seq_along(lst_res) %% 3 == 1] %>% unlist
+                )
+print(paste('median accuracy:', t_acc_dl$acc %>% median))
+
+print('low accuracy combinations')
+t_acc_dl %>% arrange(acc) %>% head(4) # it is difficult to distinguish between sp 2 and 3
+```
+
+
+```{r}
+d_comp_cl <- lst_res[seq_along(lst_res) %% 3 == 0] %>% # only take the third sub-list, which is the data
+  bind_rows()
+# save(d_comp_cl, file = 'champ_abun.RData')
+```
+
+## day 0 
+```{r}
+d_comp_cl %>% filter(day == 0) %>% 
+  group_by(lst_sp, high, n_sp) %>% 
+  mutate(freq = n/sum(n)) %>% 
+  ggplot(aes(sp, freq)) +
+  geom_point() + 
+  facet_grid(n_sp + lst_sp~high) + 
+  theme
+# ggsave(file = 'fig/freq_ini.pdf', height = 25/2.54, width = 15/2.54)
+```
+
+## how the frequency of the initial abundant species change over time
+```{r, fig.height= 20/2.54, fig.width= 15/2.54}
+d_comp_cl %>% 
+  filter(n_sp == 2) %>% 
+  filter(medium != 'NA') %>%
+  group_by(lst_sp, high, n_sp, medium, Well.Name, day) %>% 
+  mutate(freq = n/sum(n)) %>% 
+  filter(sp == high) %>% 
+  ggplot(aes(day, freq, color = medium %>% as.factor())) +
+  geom_point(size = 0.5, alpha = 0.5) + 
+  facet_grid(lst_sp ~ high) + 
+  theme +
+  theme(legend.position = 'top')
+
+ggsave(file = 'fig/freq.pdf', height = 25/2.54, width = 15/2.54)
+```
+
+pivot wider the abundance data
+```{r}
+lst_comp <- d_comp_cl %>% 
+  mutate(col = str_sub(Well.Name, 2, 3)) %>% 
+  pivot_wider(names_from = sp, values_from = n, values_fill = 0) %>% 
+  arrange(lst_sp, day, col, no, high) %>% 
+  group_split(lst_sp, no, nh, medium, day, col
+              )
+```
+
+
+
+
+
+# analyses
+
+```{r}
+cal_beta <- function(data){
+  if(nrow(data) == 1){
+    data$sim <- NA
+  }
+  
+  if(nrow(data) != 1){
+        
+    sim <- 1 -data %>% select(`1`, `2`, `3`, `4`, `5`) %>% vegdist(upper = T)# beta similarity between the communities of different initial conditions
+    sim <- sim %>% as.matrix() 
+    diag(sim) <- NA
+    
+    data$sim <- rowMeans(sim, na.rm = T) # order is already aligned before
+    
+  }
+
+  return(data)
+}
+
+d_sim <- lapply(lst_comp, cal_beta)
+d_sim <- d_sim %>% bind_rows()
+d_sim <- d_sim %>% filter(!is.na(sim)) %>% 
+  mutate(medium = paste('NO3: ', no, '; NH4: ', nh),
+         n_res = ifelse(no *nh == 0, 1, 2),
+         n_res = ifelse(is.na(n_res), 'initial', n_res)
+         ) %>% 
+  mutate(sp1 = ifelse(str_detect(lst_sp, '1'), 1, 0),
+         sp2 = ifelse(str_detect(lst_sp, '2'), 1, 0),
+         sp3 = ifelse(str_detect(lst_sp, '3'), 1, 0),
+         sp4 = ifelse(str_detect(lst_sp, '4'), 1, 0),
+         sp5 = ifelse(str_detect(lst_sp, '5'), 1, 0)
+         )
+
+```
+
+## 2 sp
+```{r}
+d_sim2 <- d_sim %>% filter(n_sp == 2) %>% 
+  select(n_sp, medium, no, nh, day, sim, lst_sp, col, n_res, sp1, sp2, sp3, sp4, sp5) %>% 
+  distinct 
+```
+
+
+whether number of niches (resources) matters (only use the last day)
+```{r}
+m2 <- lmer(sim ~ n_res + (1|lst_sp) + (1|medium), data = d_sim2 %>% filter(day == max(day)))
+anova(m2)
+```
+
+whether presence of a certain species matters
+```{r}
+m2_sp1 <- lmer(sim ~ sp1 * n_res+ (1|lst_sp) + (1|medium), data = d_sim2 %>% filter(day == max(day)))
+m2_sp2 <- lmer(sim ~ sp2 * n_res+ (1|lst_sp) + (1|medium), data = d_sim2 %>% filter(day == max(day)))
+m2_sp3 <- lmer(sim ~ sp3 * n_res+ (1|lst_sp) + (1|medium), data = d_sim2 %>% filter(day == max(day)))
+m2_sp4 <- lmer(sim ~ sp4 * n_res+ (1|lst_sp) + (1|medium), data = d_sim2 %>% filter(day == max(day)))
+m2_sp5 <- lmer(sim ~ sp5 * n_res+ (1|lst_sp) + (1|medium), data = d_sim2 %>% filter(day == max(day)))
+```
+
+
+```{r}
+anova(m2_sp1)
+anova(m2_sp2)
+anova(m2_sp3)
+anova(m2_sp4)
+anova(m2_sp5)
+```
+
+## 4 sp
+
+```{r}
+d_sim4 <- d_sim %>% filter(n_sp == 4, day == max(day)) %>% 
+  select(n_sp, medium, no, nh, day, sim, lst_sp, col, n_res, high, sp1, sp2, sp3, sp4, sp5) %>% 
+  distinct 
+```
+
+```{r}
+m4 <- lmer(sim ~ n_res + (1|lst_sp) + (1|medium), data = d_sim4 %>% filter(day == max(day)))
+anova(m4)
+```
+
+
+```{r}
+
+m4_sp1 <- lmer(sim ~ sp1 * n_res+ (1|lst_sp) + (1|medium), data = d_sim4 %>% filter(day == max(day)))
+m4_sp2 <- lmer(sim ~ sp2 * n_res+ (1|lst_sp) + (1|medium), data = d_sim4 %>% filter(day == max(day)))
+m4_sp3 <- lmer(sim ~ sp3 * n_res+ (1|lst_sp) + (1|medium), data = d_sim4 %>% filter(day == max(day)))
+m4_sp4 <- lmer(sim ~ sp4 * n_res+ (1|lst_sp) + (1|medium), data = d_sim4 %>% filter(day == max(day)))
+m4_sp5 <- lmer(sim ~ sp5 * n_res+ (1|lst_sp) + (1|medium), data = d_sim4 %>% filter(day == max(day)))
+
+
+anova(m4_sp1)
+anova(m4_sp2)
+anova(m4_sp3)
+anova(m4_sp4)
+anova(m4_sp5)
+
+
+```
+
+## all together
+
+```{r}
+d_sim_cl <- bind_rows(d_sim2, d_sim4) %>% 
+  mutate(n_sp = as.factor(n_sp),
+         n_res = as.factor(n_res)
+         )
+
+m_sp1 <- lmer(sim ~ sp1 * n_res * n_sp + (1|lst_sp) + (1|medium), data = d_sim_cl %>% filter(day == max(day)))
+m_sp2 <- lmer(sim ~ sp2 * n_res * n_sp + (1|lst_sp) + (1|medium), data = d_sim_cl %>% filter(day == max(day)))
+m_sp3 <- lmer(sim ~ sp3 * n_res * n_sp + (1|lst_sp) + (1|medium), data = d_sim_cl %>% filter(day == max(day)))
+m_sp4 <- lmer(sim ~ sp4 * n_res * n_sp + (1|lst_sp) + (1|medium), data = d_sim_cl %>% filter(day == max(day)))
+m_sp5 <- lmer(sim ~ sp5 * n_res * n_sp + (1|lst_sp) + (1|medium), data = d_sim_cl %>% filter(day == max(day)))
+
+anova(m_sp1)
+anova(m_sp2)
+anova(m_sp3)
+anova(m_sp4)
+anova(m_sp5)
+```
+
+
+
+```{r, fig.width= 10}
+
+bind_rows(d_sim2, d_sim4) %>% 
+  mutate(day = as.factor(day)) %>% 
+  ggplot(aes(day , sim, color  = n_res %>% as.factor())) +
+  geom_boxplot() +
+  scale_color_manual(values=c("blue", "red", 'black')) +
+  facet_wrap( ~ n_sp) + 
+  theme
+
+
+
+
+```
+
+
+
+```{r}
+m <- lmer((sim) ~ as.factor(n_res) * as.factor(n_sp) + (1|lst_sp) + (1|medium), data = d_sim_cl %>% filter(day == max(day)))
+
+
+anova(m)
+```
+
+
+```{r}
+d_sim_cl %>% filter(day == max(day)) %>% group_by(n_sp,n_res) %>% summarise(sim = median(sim))
+```
